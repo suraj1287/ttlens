@@ -1,8 +1,6 @@
 # TTLens - TTL Analyzer Tool for Apache Cassandra
 # Project Catalyst | Author: [Your Name]
 
-# This is the entry point for TTLens using Streamlit (MVP Version)
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -13,20 +11,14 @@ import re
 # For cluster connection
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.metadata import TableMetadata
 
-# ---------------------------
-# Sidebar - Mode Selection
-# ---------------------------
 st.set_page_config(page_title="TTLens - TTL Analyzer", layout="wide")
 st.sidebar.title("TTLens Input Mode")
 mode = st.sidebar.radio("Choose mode:", ["📂 Upload File", "🌐 Connect to Cluster"])
 
 st.title("🕒 TTLens – Cassandra TTL Expiry Analyzer")
 
-# ---------------------------
 # File Parsers
-# ---------------------------
 def parse_schema_file(uploaded_file):
     content = uploaded_file.read().decode("utf-8")
     tables = []
@@ -68,14 +60,10 @@ def simulate_ttl_decay_chart(title):
     fig = px.bar(df, x="Time Bucket", y="Records Expiring", title=title)
     st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------
-# 📂 Upload File Mode
-# ---------------------------
 if mode == "📂 Upload File":
     uploaded_file = st.file_uploader("Upload a schema.cql or tablehistograms.txt", type=["cql", "txt"])
     if uploaded_file:
         st.success(f"File `{uploaded_file.name}` uploaded successfully.")
-
         if uploaded_file.name.endswith(".cql"):
             ttl_table_data = parse_schema_file(uploaded_file)
             if not ttl_table_data.empty:
@@ -85,21 +73,16 @@ if mode == "📂 Upload File":
                 simulate_ttl_decay_chart("Projected Record Expiry")
             else:
                 st.warning("No default_time_to_live settings found in uploaded schema.")
-
         elif uploaded_file.name.endswith(".txt"):
             histogram_df = parse_histogram_file(uploaded_file)
             if not histogram_df.empty:
                 st.subheader("📈 Table Histogram Metrics")
                 st.dataframe(histogram_df, use_container_width=True)
-                fig = px.bar(histogram_df, x="Percentile", y="Partition Size (bytes)",
-                             title="Partition Size by Percentile")
+                fig = px.bar(histogram_df, x="Percentile", y="Partition Size (bytes)", title="Partition Size by Percentile")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("Could not parse histogram data. Please check the format.")
 
-# ---------------------------
-# 🌐 Connect to Cluster Mode
-# ---------------------------
 elif mode == "🌐 Connect to Cluster":
     st.subheader("Cluster Connection")
     host = st.text_input("Host")
@@ -132,9 +115,42 @@ elif mode == "🌐 Connect to Cluster":
             st.success(f"Connected to {host}:{port} – Fetched TTL tables")
             st.subheader("🧾 TTL-Enabled Tables (Live Cluster)")
             st.dataframe(ttl_table_data, use_container_width=True)
-
             st.subheader("📊 TTL Expiry Projection (Simulated)")
             simulate_ttl_decay_chart("Live TTL Expiry Projection")
+
+            # Row-Level TTL Scanner UI
+            with st.expander("🧪 Row-Level TTL Scanner"):
+                st.markdown("Check actual TTL remaining per row for a given table")
+                keyspace = st.text_input("Keyspace")
+                table = st.text_input("Table")
+                partition_key = st.text_input("Partition Key Value (as string)")
+                column = st.text_input("Column to Scan TTL")
+                if st.button("Scan Row TTL"):
+                    try:
+                        ttl_query = f"SELECT ttl({column}), writetime({column}) FROM {keyspace}.{table} WHERE partition_key = '{partition_key}' LIMIT 100;"
+                        result = session.execute(ttl_query)
+                        row_data = []
+                        now = int(datetime.utcnow().timestamp() * 1e6)
+                        for row in result:
+                            ttl_value = row[0]
+                            writetime_value = row[1]
+                            remaining_sec = ttl_value if ttl_value is not None else -1
+                            row_data.append({
+                                "TTL Remaining (sec)": remaining_sec,
+                                "TTL Bucket": "<1h" if 0 < remaining_sec <= 3600 else 
+                                               "1–6h" if remaining_sec <= 21600 else 
+                                               "6–24h" if remaining_sec <= 86400 else 
+                                               ">1d" if remaining_sec > 86400 else "∞ / No TTL"
+                            })
+                        if row_data:
+                            df_ttl = pd.DataFrame(row_data)
+                            st.dataframe(df_ttl)
+                            fig = px.histogram(df_ttl, x="TTL Bucket", title="TTL Distribution by Bucket")
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No TTL values found for the query.")
+                    except Exception as err:
+                        st.error(f"Error querying TTL: {err}")
 
         except Exception as e:
             st.error(f"Connection failed: {str(e)}")
