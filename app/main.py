@@ -29,6 +29,14 @@ def parse_schema_file(uploaded_file):
         })
     return pd.DataFrame(tables)
 
+def get_table_default_ttl(session, keyspace, table):
+    try:
+        q = f"SELECT default_time_to_live FROM system_schema.tables WHERE keyspace_name='{keyspace}' AND table_name='{table}' ALLOW FILTERING;"
+        row = session.execute(q).one()
+        return row.default_time_to_live if row else 0
+    except:
+        return 0
+
 if mode == "📂 Upload File":
     uploaded_file = st.file_uploader("Upload a schema.cql", type=["cql"])
     if uploaded_file:
@@ -77,28 +85,47 @@ elif mode == "🌐 Connect to Cluster":
                     result = session.execute(query)
                     row = result.one()
 
-                    if row:
-                        ttl_data = []
-                        for i, col in enumerate(cols):
-                            ttl_val = row[i]
-                            ttl_data.append({
-                                "Column": col,
-                                "TTL Remaining (sec)": ttl_val if ttl_val is not None else "∞ / No TTL",
-                                "Expiring": ttl_val is not None
-                            })
-                        df = pd.DataFrame(ttl_data)
-                        st.session_state["last_ttl_df"] = df
-                        st.dataframe(df)
+                    default_ttl = get_table_default_ttl(session, keyspace, table)
 
-                        csv_buffer = io.StringIO()
-                        df.to_csv(csv_buffer, index=False)
-                        st.download_button(
-                            label="📥 Download TTL Results as CSV",
-                            data=csv_buffer.getvalue(),
-                            file_name=f"ttl_scan_{table}.csv",
-                            mime="text/csv"
-                        )
-                    else:
-                        st.info("No row found for the provided partition key value.")
+                    ttl_data = []
+                    min_ttl = None
+                    for i, col in enumerate(cols):
+                        ttl_val = row[i]
+                        if ttl_val is not None:
+                            if min_ttl is None or ttl_val < min_ttl:
+                                min_ttl = ttl_val
+                        ttl_data.append({
+                            "Column": col,
+                            "TTL Remaining (sec)": ttl_val if ttl_val is not None else "∞ / No TTL",
+                            "Expiring": ttl_val is not None
+                        })
+
+                    row_expiry_source = "∞ / No TTL"
+                    row_expiry_ttl = "∞"
+                    if min_ttl is not None:
+                        row_expiry_source = "Column TTL"
+                        row_expiry_ttl = min_ttl
+                    elif default_ttl > 0:
+                        row_expiry_source = "Table Default TTL"
+                        row_expiry_ttl = default_ttl
+
+                    ttl_data.append({
+                        "Column": "[Row Estimate]",
+                        "TTL Remaining (sec)": row_expiry_ttl,
+                        "Expiring": row_expiry_source
+                    })
+
+                    df = pd.DataFrame(ttl_data)
+                    st.session_state["last_ttl_df"] = df
+                    st.dataframe(df)
+
+                    csv_buffer = io.StringIO()
+                    df.to_csv(csv_buffer, index=False)
+                    st.download_button(
+                        label="📥 Download TTL Results as CSV",
+                        data=csv_buffer.getvalue(),
+                        file_name=f"ttl_scan_{table}.csv",
+                        mime="text/csv"
+                    )
                 except Exception as err:
                     st.error(f"Query error: {err}")
