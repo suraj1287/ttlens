@@ -8,6 +8,7 @@ from datetime import datetime
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
 import re
+import io
 
 st.set_page_config(page_title="TTLens - TTL Analyzer", layout="wide")
 st.sidebar.title("TTLens Input Mode")
@@ -52,38 +53,52 @@ elif mode == "🌐 Connect to Cluster":
             auth_provider = PlainTextAuthProvider(username=username, password=password)
             cluster = Cluster([host], port=port, auth_provider=auth_provider)
             session = cluster.connect()
+            st.session_state["cluster"] = cluster
+            st.session_state["session"] = session
+            st.session_state["connected"] = True
             st.success(f"Connected to {host}:{port}")
-
-            with st.expander("🧪 Multi-Column TTL Scanner"):
-                keyspace = st.text_input("Keyspace")
-                table = st.text_input("Table")
-                partition_key_column = st.text_input("Partition Key Column")
-                partition_key_value = st.text_input("Partition Key Value")
-                columns_to_check = st.text_input("Comma-separated column names to scan for TTL")
-
-                if st.button("Scan TTLs for All Columns"):
-                    try:
-                        cols = [col.strip() for col in columns_to_check.split(",")]
-                        select_clause = ", ".join([f"ttl({col})" for col in cols])
-                        query = f"SELECT {select_clause} FROM {keyspace}.{table} WHERE {partition_key_column} = '{partition_key_value}' LIMIT 1;"
-                        result = session.execute(query)
-                        row = result.one()
-
-                        if row:
-                            ttl_data = []
-                            for i, col in enumerate(cols):
-                                ttl_val = row[i]
-                                ttl_data.append({
-                                    "Column": col,
-                                    "TTL Remaining (sec)": ttl_val if ttl_val is not None else "∞ / No TTL",
-                                    "Expiring": ttl_val is not None
-                                })
-                            df = pd.DataFrame(ttl_data)
-                            st.dataframe(df)
-                        else:
-                            st.info("No row found for the provided partition key value.")
-                    except Exception as err:
-                        st.error(f"Query error: {err}")
-
         except Exception as e:
             st.error(f"Connection failed: {str(e)}")
+
+    if st.session_state.get("connected"):
+        with st.expander("🧪 Multi-Column TTL Scanner"):
+            keyspace = st.text_input("Keyspace")
+            table = st.text_input("Table")
+            partition_key_column = st.text_input("Partition Key Column")
+            partition_key_value = st.text_input("Partition Key Value")
+            columns_to_check = st.text_input("Comma-separated column names to scan for TTL")
+
+            if st.button("Scan TTLs for All Columns"):
+                try:
+                    session = st.session_state["session"]
+                    cols = [col.strip() for col in columns_to_check.split(",")]
+                    select_clause = ", ".join([f"ttl({col})" for col in cols])
+                    query = f"SELECT {select_clause} FROM {keyspace}.{table} WHERE {partition_key_column} = '{partition_key_value}' LIMIT 1;"
+                    result = session.execute(query)
+                    row = result.one()
+
+                    if row:
+                        ttl_data = []
+                        for i, col in enumerate(cols):
+                            ttl_val = row[i]
+                            ttl_data.append({
+                                "Column": col,
+                                "TTL Remaining (sec)": ttl_val if ttl_val is not None else "∞ / No TTL",
+                                "Expiring": ttl_val is not None
+                            })
+                        df = pd.DataFrame(ttl_data)
+                        st.session_state["last_ttl_df"] = df
+                        st.dataframe(df)
+
+                        csv_buffer = io.StringIO()
+                        df.to_csv(csv_buffer, index=False)
+                        st.download_button(
+                            label="📥 Download TTL Results as CSV",
+                            data=csv_buffer.getvalue(),
+                            file_name=f"ttl_scan_{table}.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.info("No row found for the provided partition key value.")
+                except Exception as err:
+                    st.error(f"Query error: {err}")
